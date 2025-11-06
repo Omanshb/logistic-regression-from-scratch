@@ -357,8 +357,9 @@ def main():
         y = target
         
         from sklearn.model_selection import train_test_split
+        test_size = st.slider("Test set size", 0.1, 0.5, 0.2, 0.05)
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
+            X, y, test_size=test_size, random_state=42, stratify=y
         )
         
         st.markdown("#### Gradient Descent Parameters")
