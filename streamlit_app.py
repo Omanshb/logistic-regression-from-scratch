@@ -16,6 +16,80 @@ from logistic_from_scratch import (
 )
 
 
+def validate_and_clean_data(df, target, task_type='classification'):
+    """
+    Validate and clean uploaded data for classification.
+    Returns cleaned dataframe, target, and any warnings/errors.
+    """
+    errors = []
+    warnings = []
+    
+    if df is None or df.empty:
+        errors.append("Dataset is empty or could not be loaded.")
+        return None, None, errors, warnings
+    
+    if target is None or len(target) == 0:
+        errors.append("Target column is empty or invalid.")
+        return None, None, errors, warnings
+    
+    if len(df) != len(target):
+        errors.append(f"Feature count ({len(df)}) doesn't match target count ({len(target)}).")
+        return None, None, errors, warnings
+    
+    df_cleaned = df.copy()
+    
+    numeric_cols = df_cleaned.select_dtypes(include=[np.number]).columns.tolist()
+    non_numeric_cols = df_cleaned.select_dtypes(exclude=[np.number]).columns.tolist()
+    
+    if len(non_numeric_cols) > 0:
+        warnings.append(f"Found {len(non_numeric_cols)} non-numeric column(s): {', '.join(non_numeric_cols)}. These will be dropped.")
+        df_cleaned = df_cleaned[numeric_cols]
+    
+    if df_cleaned.empty:
+        errors.append("No numeric features remaining after cleaning. Please ensure your dataset contains numeric columns.")
+        return None, None, errors, warnings
+    
+    missing_values = df_cleaned.isnull().sum().sum()
+    if missing_values > 0:
+        warnings.append(f"Found {missing_values} missing values. These will be filled with column means.")
+        df_cleaned = df_cleaned.fillna(df_cleaned.mean())
+    
+    try:
+        target = np.array(target)
+        unique_classes = np.unique(target)
+        
+        if task_type == 'classification':
+            if len(unique_classes) < 2:
+                errors.append("Classification requires at least 2 classes in target.")
+                return None, None, errors, warnings
+            
+            if len(unique_classes) > 2:
+                errors.append("This implementation currently supports binary classification only. Please ensure your target has exactly 2 classes.")
+                return None, None, errors, warnings
+            
+            target = target.astype(int)
+        else:
+            target = np.array(target, dtype=float)
+            if np.any(np.isnan(target)):
+                warnings.append("Found missing values in target. These rows will be removed.")
+                valid_mask = ~np.isnan(target)
+                target = target[valid_mask]
+                df_cleaned = df_cleaned.iloc[valid_mask]
+    except (ValueError, TypeError) as e:
+        errors.append(f"Target column contains invalid values: {str(e)}")
+        return None, None, errors, warnings
+    
+    if len(df_cleaned) < 10:
+        errors.append(f"Insufficient data: need at least 10 samples, got {len(df_cleaned)}.")
+        return None, None, errors, warnings
+    
+    if df_cleaned.shape[1] < 1:
+        errors.append("Need at least 1 numeric feature for classification.")
+        return None, None, errors, warnings
+    
+    return df_cleaned, target, errors, warnings
+
+
 def load_sample_datasets():
     """Load built-in classification datasets for demonstration."""
     datasets = {}
@@ -303,20 +377,42 @@ def main():
         uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=['csv'])
         
         if uploaded_file is not None:
-            df = pd.read_csv(uploaded_file)
-            dataset_name = uploaded_file.name
-            
-            if len(df.columns) > 1:
-                target_col = st.sidebar.selectbox(
-                    "Select target column:",
-                    list(df.columns)
-                )
+            try:
+                df = pd.read_csv(uploaded_file)
+                dataset_name = uploaded_file.name
                 
-                if target_col:
-                    target = df[target_col].values
-                    df = df.drop(columns=[target_col])
-                    unique_classes = np.unique(target)
-                    target_names = unique_classes if len(unique_classes) == 2 else None
+                if len(df.columns) < 2:
+                    st.error("Dataset must have at least 2 columns (features + target).")
+                    df = None
+                else:
+                    target_col = st.sidebar.selectbox(
+                        "Select target column:",
+                        list(df.columns)
+                    )
+                    
+                    if target_col:
+                        target = df[target_col].values
+                        df = df.drop(columns=[target_col])
+                        
+                        df, target, errors, warnings = validate_and_clean_data(df, target, 'classification')
+                        
+                        if errors:
+                            for error in errors:
+                                st.error(error)
+                            df = None
+                            target = None
+                            target_names = None
+                        else:
+                            if warnings:
+                                for warning in warnings:
+                                    st.warning(warning)
+                            unique_classes = np.unique(target)
+                            target_names = unique_classes if len(unique_classes) == 2 else None
+            except Exception as e:
+                st.error(f"Error reading CSV file: {str(e)}")
+                df = None
+                target = None
+                target_names = None
     
     if df is not None and target is not None:
         st.header(f"Dataset: {dataset_name}")
@@ -353,14 +449,30 @@ def main():
         if len(feature_selection) == 0:
             feature_selection = list(df.columns)
         
-        X = df[feature_selection].values
-        y = target
-        
-        from sklearn.model_selection import train_test_split
-        test_size = st.slider("Test set size", 0.1, 0.5, 0.2, 0.05)
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=42, stratify=y
-        )
+        try:
+            X = df[feature_selection].select_dtypes(include=[np.number]).values
+            if X.shape[1] == 0:
+                st.error("Selected features contain no numeric data. Please select numeric features only.")
+                st.stop()
+            
+            y = np.array(target, dtype=int)
+            
+            if X.shape[0] != len(y):
+                st.error("Feature and target dimensions don't match.")
+                st.stop()
+            
+            from sklearn.model_selection import train_test_split
+            test_size = st.slider("Test set size", 0.1, 0.5, 0.2, 0.05)
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=test_size, random_state=42, stratify=y
+            )
+            
+            if len(X_train) < 2:
+                st.error("Training set too small. Please reduce test size or use more data.")
+                st.stop()
+        except Exception as e:
+            st.error(f"Error processing data: {str(e)}")
+            st.stop()
         
         st.markdown("#### Gradient Descent Parameters")
         
@@ -405,33 +517,38 @@ def main():
         
         if st.button("Train Model", type="primary"):
             with st.spinner("Training model..."):
-                X_train_scaled, mean, std = standardize_features(X_train)
-                X_test_scaled = (X_test - mean) / std
-                
-                model = LogisticRegressionFromScratch(
-                    learning_rate=learning_rate,
-                    max_iterations=max_iterations,
-                    batch_size=batch_size,
-                    fit_intercept=True
-                )
-                model.fit(X_train_scaled, y_train, verbose=False)
-                
-                y_train_pred = model.predict(X_train_scaled)
-                y_test_pred = model.predict(X_test_scaled)
-                y_train_proba = model.predict_proba(X_train_scaled)
-                y_test_proba = model.predict_proba(X_test_scaled)
-                
-                st.session_state['model'] = model
-                st.session_state['X_train'] = X_train_scaled
-                st.session_state['X_test'] = X_test_scaled
-                st.session_state['y_train'] = y_train
-                st.session_state['y_test'] = y_test
-                st.session_state['y_train_pred'] = y_train_pred
-                st.session_state['y_test_pred'] = y_test_pred
-                st.session_state['y_train_proba'] = y_train_proba
-                st.session_state['y_test_proba'] = y_test_proba
-                st.session_state['feature_names'] = feature_selection
-                st.session_state['target_names'] = target_names
+                try:
+                    X_train_scaled, mean, std = standardize_features(X_train)
+                    X_test_scaled = (X_test - mean) / std
+                    
+                    model = LogisticRegressionFromScratch(
+                        learning_rate=learning_rate,
+                        max_iterations=max_iterations,
+                        batch_size=batch_size,
+                        fit_intercept=True
+                    )
+                    model.fit(X_train_scaled, y_train, verbose=False)
+                    
+                    y_train_pred = model.predict(X_train_scaled)
+                    y_test_pred = model.predict(X_test_scaled)
+                    y_train_proba = model.predict_proba(X_train_scaled)
+                    y_test_proba = model.predict_proba(X_test_scaled)
+                    
+                    st.session_state['model'] = model
+                    st.session_state['X_train'] = X_train_scaled
+                    st.session_state['X_test'] = X_test_scaled
+                    st.session_state['y_train'] = y_train
+                    st.session_state['y_test'] = y_test
+                    st.session_state['y_train_pred'] = y_train_pred
+                    st.session_state['y_test_pred'] = y_test_pred
+                    st.session_state['y_train_proba'] = y_train_proba
+                    st.session_state['y_test_proba'] = y_test_proba
+                    st.session_state['feature_names'] = feature_selection
+                    st.session_state['target_names'] = target_names
+                except ValueError as e:
+                    st.error(f"Value error during training: {str(e)}")
+                except Exception as e:
+                    st.error(f"Error during training: {str(e)}")
         
         if 'model' in st.session_state:
             model = st.session_state['model']
